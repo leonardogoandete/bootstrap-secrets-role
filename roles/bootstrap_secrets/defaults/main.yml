@@ -2,15 +2,27 @@
 bootstrap_secrets_target_user: "{{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}"
 bootstrap_secrets_target_home: "{{ '/root' if bootstrap_secrets_target_user == 'root' else '/home/' ~ bootstrap_secrets_target_user }}"
 bootstrap_secrets_bw_session: "{{ lookup('env', 'BW_SESSION') | default('', true) }}"
+bootstrap_secrets_bw_version: "2026.4.1"
+bootstrap_secrets_bw_release_base_url: "https://github.com/bitwarden/clients/releases/download/cli-v{{ bootstrap_secrets_bw_version }}"
 
 bootstrap_secrets_items:
   - name: github_ssh_private_key
-    bw_item_id: ""
-    dest: "{{ bootstrap_secrets_target_home }}/.ssh/id_ed25519"
+    bw_item_id: "fadbc399-ee70-47ce-8155-b4380037ebe4"
+    dest: "{{ bootstrap_secrets_target_home }}/.ssh/id_ed25519_github"
     mode: "0600"
   - name: chezmoi_age_private_key
-    bw_item_id: ""
+    bw_item_id: "988f905b-a81d-4578-97ab-b43701738949"
     dest: "{{ bootstrap_secrets_target_home }}/.config/chezmoi/age/key.txt"
     mode: "0600"
+
+bootstrap_secrets_ssh_private_key_path: >-
+  {{
+    (bootstrap_secrets_items
+    | selectattr('name', 'equalto', 'github_ssh_private_key')
+    | map(attribute='dest')
+    | list
+    | first)
+    | default(bootstrap_secrets_target_home ~ '/.ssh/id_ed25519_github', true)
+  }}
 
 bootstrap_secrets_create_ssh_public_key: true

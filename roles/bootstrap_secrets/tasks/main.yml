@@ -6,11 +6,59 @@
   failed_when: false
 
 - name: Install Bitwarden CLI if missing
-  ansible.builtin.package:
-    name: bitwarden-cli
-    state: present
+  ansible.builtin.set_fact:
+    bootstrap_secrets_bw_asset_name: >-
+      {{ 'bw-linux-arm64-' ~ bootstrap_secrets_bw_version ~ '.zip'
+         if ansible_facts["architecture"] in ['aarch64', 'arm64']
+         else 'bw-linux-' ~ bootstrap_secrets_bw_version ~ '.zip' }}
   when: bootstrap_secrets_bw_binary.rc != 0
+
+- name: Download Bitwarden CLI release
+  ansible.builtin.get_url:
+    url: "{{ bootstrap_secrets_bw_release_base_url }}/{{ bootstrap_secrets_bw_asset_name }}"
+    dest: "/tmp/{{ bootstrap_secrets_bw_asset_name }}"
+    mode: "0644"
+  when:
+    - bootstrap_secrets_bw_binary.rc != 0
+    - ansible_facts["system"] == 'Linux'
+
+- name: Extract Bitwarden CLI binary
+  ansible.builtin.unarchive:
+    src: "/tmp/{{ bootstrap_secrets_bw_asset_name }}"
+    dest: /tmp/
+    remote_src: true
+  when:
+    - bootstrap_secrets_bw_binary.rc != 0
+    - ansible_facts["system"] == 'Linux'
+
+- name: Install Bitwarden CLI binary
+  ansible.builtin.copy:
+    src: /tmp/bw
+    dest: /usr/local/bin/bw
+    mode: "0755"
+    remote_src: true
+  when:
+    - bootstrap_secrets_bw_binary.rc != 0
+    - ansible_facts["system"] == 'Linux'
   become: true
+
+- name: Remove temporary Bitwarden CLI files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/{{ bootstrap_secrets_bw_asset_name }}"
+    - /tmp/bw
+  when:
+    - bootstrap_secrets_bw_binary.rc != 0
+    - ansible_facts["system"] == 'Linux'
+
+- name: Fail when platform is unsupported for automatic BW install
+  ansible.builtin.fail:
+    msg: "Automatic Bitwarden CLI install is supported only on Linux in this role."
+  when:
+    - bootstrap_secrets_bw_binary.rc != 0
+    - ansible_facts["system"] != 'Linux'
 
 - name: Re-check Bitwarden CLI binary
   ansible.builtin.command: command -v bw
@@ -25,11 +73,6 @@
       - bootstrap_secrets_bw_session | length > 0
     fail_msg: "BW_SESSION is required. Export BW_SESSION or pass -e bootstrap_secrets_bw_session=<token>."
 
-- name: Fail when Bitwarden CLI is missing
-  ansible.builtin.fail:
-    msg: "Bitwarden CLI (bw) not found. Install it before running this role."
-  when: bootstrap_secrets_bw_binary.rc != 0
-
 - name: Ensure parent directories for secret files
   ansible.builtin.file:
     path: "{{ item.dest | dirname }}"
@@ -40,30 +83,98 @@
   loop: "{{ bootstrap_secrets_items }}"
   become: true
 
-- name: Fetch secrets from Bitwarden secure notes
-  ansible.builtin.command: "bw get notes {{ item.bw_item_id }} --session {{ bootstrap_secrets_bw_session }}"
+- name: Fetch Bitwarden items
+  ansible.builtin.command: "bw get item {{ item.bw_item_id }} --session {{ bootstrap_secrets_bw_session }}"
   loop: "{{ bootstrap_secrets_items }}"
   loop_control:
     label: "{{ item.name }}"
-  register: bootstrap_secrets_bw_notes
+  register: bootstrap_secrets_bw_items
   changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ bootstrap_secrets_target_user }}"
+  environment:
+    HOME: "{{ bootstrap_secrets_target_home }}"
   no_log: true
+
+- name: Fail when Bitwarden item cannot be fetched
+  ansible.builtin.fail:
+    msg: "Failed to fetch Bitwarden item '{{ item.item.name }}' (id={{ item.item.bw_item_id }})."
+  loop: "{{ bootstrap_secrets_bw_items.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: item.rc != 0
+
+- name: Initialize resolved Bitwarden items
+  ansible.builtin.set_fact:
+    bootstrap_secrets_resolved_items: []
+  no_log: true
+
+- name: Build secret payloads for SSH Key items
+  ansible.builtin.set_fact:
+    bootstrap_secrets_resolved_items: >-
+      {{
+        (bootstrap_secrets_resolved_items)
+        + [
+            {
+              'name': item.item.name,
+              'dest': item.item.dest,
+              'mode': item.item.mode | default('0600'),
+              'content': (item.stdout | from_json).sshKey.privateKey | default('')
+            }
+          ]
+      }}
+  loop: "{{ bootstrap_secrets_bw_items.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: (item.stdout | from_json).type == 5
+  no_log: true
+
+- name: Build secret payloads for non-SSH items
+  ansible.builtin.set_fact:
+    bootstrap_secrets_resolved_items: >-
+      {{
+        (bootstrap_secrets_resolved_items)
+        + [
+            {
+              'name': item.item.name,
+              'dest': item.item.dest,
+              'mode': item.item.mode | default('0600'),
+              'content': (item.stdout | from_json).login.password
+            }
+          ]
+      }}
+  loop: "{{ bootstrap_secrets_bw_items.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: (item.stdout | from_json).type != 5
+  no_log: true
+
+- name: Fail when Bitwarden item has no usable secret content
+  ansible.builtin.fail:
+    msg: >-
+      Bitwarden item '{{ item.name }}' has no usable content.
+      Expected sshKey.privateKey or non-empty notes/password.
+  loop: "{{ bootstrap_secrets_resolved_items }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.content | length == 0
 
 - name: Write secret files
   ansible.builtin.copy:
-    dest: "{{ item.item.dest }}"
-    content: "{{ item.stdout }}\n"
+    dest: "{{ item.dest }}"
+    content: "{{ item.content }}\n"
     owner: "{{ bootstrap_secrets_target_user }}"
     group: "{{ bootstrap_secrets_target_user }}"
-    mode: "{{ item.item.mode | default('0600') }}"
-  loop: "{{ bootstrap_secrets_bw_notes.results }}"
+    mode: "{{ item.mode }}"
+  loop: "{{ bootstrap_secrets_resolved_items }}"
   loop_control:
-    label: "{{ item.item.name }}"
+    label: "{{ item.name }}"
   become: true
   no_log: true
 
 - name: Ensure SSH public key exists
-  ansible.builtin.command: "ssh-keygen -y -f {{ bootstrap_secrets_target_home }}/.ssh/id_ed25519"
+  ansible.builtin.command: "ssh-keygen -y -f {{ bootstrap_secrets_ssh_private_key_path }}"
   register: bootstrap_secrets_ssh_pubkey
   changed_when: false
   become: true
@@ -73,7 +184,7 @@
 
 - name: Write SSH public key
   ansible.builtin.copy:
-    dest: "{{ bootstrap_secrets_target_home }}/.ssh/id_ed25519.pub"
+    dest: "{{ bootstrap_secrets_ssh_private_key_path }}.pub"
     content: "{{ bootstrap_secrets_ssh_pubkey.stdout }}\n"
     owner: "{{ bootstrap_secrets_target_user }}"
     group: "{{ bootstrap_secrets_target_user }}"
