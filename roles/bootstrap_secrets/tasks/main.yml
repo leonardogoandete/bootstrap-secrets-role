@@ -1,0 +1,75 @@
+---
+- name: Validate BW session
+  ansible.builtin.assert:
+    that:
+      - bootstrap_secrets_bw_session | length > 0
+    fail_msg: "BW_SESSION is required. Export BW_SESSION or pass -e bootstrap_secrets_bw_session=<token>."
+
+- name: Check Bitwarden CLI binary
+  ansible.builtin.command: command -v bw
+  register: bootstrap_secrets_bw_binary
+  changed_when: false
+  failed_when: false
+
+- name: Install Bitwarden CLI if missing
+  ansible.builtin.package:
+    name: bitwarden-cli
+    state: present
+  when: bootstrap_secrets_bw_binary.rc != 0
+  become: true  
+
+- name: Fail when Bitwarden CLI is missing
+  ansible.builtin.fail:
+    msg: "Bitwarden CLI (bw) not found. Install it before running this role."
+  when: bootstrap_secrets_bw_binary.rc != 0
+
+- name: Ensure parent directories for secret files
+  ansible.builtin.file:
+    path: "{{ item.dest | dirname }}"
+    state: directory
+    owner: "{{ bootstrap_secrets_target_user }}"
+    group: "{{ bootstrap_secrets_target_user }}"
+    mode: "0700"
+  loop: "{{ bootstrap_secrets_items }}"
+  become: true
+
+- name: Fetch secrets from Bitwarden secure notes
+  ansible.builtin.command: "bw get notes {{ item.bw_item_id }} --session {{ bootstrap_secrets_bw_session }}"
+  loop: "{{ bootstrap_secrets_items }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: bootstrap_secrets_bw_notes
+  changed_when: false
+  no_log: true
+
+- name: Write secret files
+  ansible.builtin.copy:
+    dest: "{{ item.item.dest }}"
+    content: "{{ item.stdout }}\n"
+    owner: "{{ bootstrap_secrets_target_user }}"
+    group: "{{ bootstrap_secrets_target_user }}"
+    mode: "{{ item.item.mode | default('0600') }}"
+  loop: "{{ bootstrap_secrets_bw_notes.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  become: true
+  no_log: true
+
+- name: Ensure SSH public key exists
+  ansible.builtin.command: "ssh-keygen -y -f {{ bootstrap_secrets_target_home }}/.ssh/id_ed25519"
+  register: bootstrap_secrets_ssh_pubkey
+  changed_when: false
+  become: true
+  become_user: "{{ bootstrap_secrets_target_user }}"
+  when: bootstrap_secrets_create_ssh_public_key | bool
+  no_log: true
+
+- name: Write SSH public key
+  ansible.builtin.copy:
+    dest: "{{ bootstrap_secrets_target_home }}/.ssh/id_ed25519.pub"
+    content: "{{ bootstrap_secrets_ssh_pubkey.stdout }}\n"
+    owner: "{{ bootstrap_secrets_target_user }}"
+    group: "{{ bootstrap_secrets_target_user }}"
+    mode: "0644"
+  become: true
+  when: bootstrap_secrets_create_ssh_public_key | bool

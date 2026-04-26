@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: bootstrap_secrets
+  author: leo
+  description: Bootstrap initial secrets from Bitwarden CLI secure notes
+  license: MIT
+  min_ansible_version: "2.13"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+dependencies: []
