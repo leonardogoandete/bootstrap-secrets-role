@@ -1,10 +1,4 @@
 ---
-- name: Validate BW session
-  ansible.builtin.assert:
-    that:
-      - bootstrap_secrets_bw_session | length > 0
-    fail_msg: "BW_SESSION is required. Export BW_SESSION or pass -e bootstrap_secrets_bw_session=<token>."
-
 - name: Check Bitwarden CLI binary
   ansible.builtin.command: command -v bw
   register: bootstrap_secrets_bw_binary
@@ -16,7 +10,20 @@
     name: bitwarden-cli
     state: present
   when: bootstrap_secrets_bw_binary.rc != 0
-  become: true  
+  become: true
+
+- name: Re-check Bitwarden CLI binary
+  ansible.builtin.command: command -v bw
+  register: bootstrap_secrets_bw_binary
+  changed_when: false
+  failed_when: false
+  when: bootstrap_secrets_bw_binary.rc != 0
+  
+- name: Validate BW session
+  ansible.builtin.assert:
+    that:
+      - bootstrap_secrets_bw_session | length > 0
+    fail_msg: "BW_SESSION is required. Export BW_SESSION or pass -e bootstrap_secrets_bw_session=<token>."
 
 - name: Fail when Bitwarden CLI is missing
   ansible.builtin.fail:
